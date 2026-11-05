@@ -1,0 +1,38 @@
+export const QUESTIONS = {
+  glb: [
+    { question: 'Sebuah mobil bergerak dengan kecepatan tetap 12 m/s selama 5 s. Berapa jarak yang ditempuh?', options: ['17 m', '60 m', '2,4 m', '30 m'], answer: 1, formula: 's = v × t', explanation: 's = 12 × 5 = 60 m. Pada GLB, kecepatan konstan sehingga jarak adalah hasil kali kecepatan dan waktu.' },
+    { question: 'Apa ciri utama Gerak Lurus Beraturan (GLB)?', options: ['Percepatan selalu bertambah', 'Lintasan melingkar', 'Kecepatan konstan pada lintasan lurus', 'Benda selalu diam'], answer: 2, formula: 'v = konstan; a = 0', explanation: 'GLB memiliki lintasan lurus dan kecepatan tetap, sehingga percepatannya nol.' },
+    { question: 'Pelari menempuh 100 m dalam 20 s dengan laju tetap. Berapa kelajuannya?', options: ['5 m/s', '20 m/s', '80 m/s', '2 m/s'], answer: 0, formula: 'v = s / t', explanation: 'v = 100 / 20 = 5 m/s.' },
+    { question: 'Sebuah kereta melaju 15 m/s selama 2 menit. Berapa jaraknya?', options: ['30 m', '450 m', '1.800 m', '7,5 m'], answer: 2, formula: 's = v × t', explanation: 'Dua menit = 120 s. Maka s = 15 × 120 = 1.800 m.' },
+    { question: 'Dalam grafik posisi-waktu, kemiringan garis menyatakan ...', options: ['Percepatan', 'Kecepatan', 'Massa', 'Gaya'], answer: 1, formula: 'v = Δs / Δt', explanation: 'Gradien grafik posisi terhadap waktu adalah perubahan posisi dibagi perubahan waktu, yaitu kecepatan.' },
+    { question: 'Jika benda GLB menempuh 240 m dengan kecepatan 8 m/s, waktu tempuhnya adalah ...', options: ['30 s', '1.920 s', '32 s', '20 s'], answer: 0, formula: 't = s / v', explanation: 't = 240 / 8 = 30 s.' },
+    { question: 'Kecepatan 72 km/jam setara dengan ...', options: ['10 m/s', '20 m/s', '25 m/s', '72 m/s'], answer: 1, formula: 'v (m/s) = v (km/jam) / 3,6', explanation: '72 / 3,6 = 20 m/s.' },
+    { question: 'Pada GLB, jarak yang ditempuh dalam selang waktu sama adalah ...', options: ['Selalu berbeda', 'Sama', 'Nol', 'Makin kecil'], answer: 1, formula: 's = v × t, v konstan', explanation: 'Karena kecepatan tetap, setiap selang waktu yang sama menghasilkan jarak yang sama.' },
+    { question: 'Sepeda bergerak 6 m/s. Berapa waktu untuk menempuh 90 m?', options: ['15 s', '540 s', '84 s', '12 s'], answer: 0, formula: 't = s / v', explanation: 't = 90 / 6 = 15 s.' },
+    { question: 'Sebuah benda menempuh 50 m dalam 10 s dengan gerak lurus beraturan. Jaraknya setelah 4 s adalah ...', options: ['5 m', '20 m', '40 m', '200 m'], answer: 1, formula: 'v = 50/10 = 5 m/s; s = v × t', explanation: 'Kecepatannya 5 m/s, jadi dalam 4 s jarak yang ditempuh 5 × 4 = 20 m.' }
+  ],
+  glbb: [
+    { question: 'Kecepatan awal 4 m/s, percepatan 2 m/s² selama 3 s. Kecepatan akhirnya ...', options: ['6 m/s', '10 m/s', '12 m/s', '24 m/s'], answer: 1, formula: 'v = v₀ + at', explanation: 'v = 4 + (2 × 3) = 10 m/s.' },
+    { question: 'Mobil dari keadaan diam dipercepat 3 m/s² selama 4 s. Jaraknya adalah ...', options: ['12 m', '24 m', '48 m', '7 m'], answer: 1, formula: 's = v₀t + ½at²', explanation: 's = 0 + ½ × 3 × 4² = 24 m.' },
+    { question: 'Percepatan adalah perubahan ... tiap satuan waktu.', options: ['Posisi', 'Kecepatan', 'Massa', 'Gaya'], answer: 1, formula: 'a = Δv / Δt', explanation: 'Percepatan menyatakan perubahan kecepatan dalam setiap satuan waktu, dengan satuan m/s².' },
+    { question: 'Kecepatan berubah dari 5 m/s menjadi 17 m/s dalam 4 s. Percepatannya ...', options: ['3 m/s²', '4 m/s²', '5,5 m/s²', '12 m/s²'], answer: 0, formula: 'a = (v − v₀) / t', explanation: 'a = (17 − 5) / 4 = 3 m/s².' },
+    { question: 'Benda bergerak 20 m/s lalu direm dengan perlambatan 5 m/s². Waktu hingga berhenti ...', options: ['2 s', '4 s', '5 s', '25 s'], answer: 1, formula: 'v = v₀ + at', explanation: '0 = 20 − 5t, sehingga t = 4 s.' },
+    { question: 'Mobil dari diam mengalami percepatan 2 m/s² selama 6 s. Kecepatan akhirnya ...', options: ['8 m/s', '12 m/s', '18 m/s', '36 m/s'], answer: 1, formula: 'v = v₀ + at', explanation: 'v = 0 + (2 × 6) = 12 m/s.' },
+    { question: 'Satuan SI untuk percepatan adalah ...', options: ['m/s', 'm/s²', 'km/jam', 'N/s'], answer: 1, formula: 'a = Δv / Δt', explanation: 'Percepatan adalah (m/s) dibagi s, sehingga satuannya m/s².' },
+    { question: 'Sebuah benda memiliki v₀ = 3 m/s dan a = 2 m/s². Jarak dalam 5 s adalah ...', options: ['25 m', '40 m', '65 m', '35 m'], answer: 1, formula: 's = v₀t + ½at²', explanation: 's = (3 × 5) + ½ × 2 × 25 = 15 + 25 = 40 m.' },
+    { question: 'Kecepatan 25 m/s berkurang menjadi 10 m/s selama 3 s. Percepatannya ...', options: ['−5 m/s²', '5 m/s²', '−15 m/s²', '−3 m/s²'], answer: 0, formula: 'a = (v − v₀) / t', explanation: 'a = (10 − 25) / 3 = −5 m/s². Tanda negatif menunjukkan perlambatan.' },
+    { question: 'Grafik kecepatan-waktu berupa garis lurus menanjak menunjukkan ...', options: ['Kecepatan nol', 'Percepatan konstan positif', 'Percepatan berubah acak', 'Benda diam'], answer: 1, formula: 'a = Δv / Δt', explanation: 'Gradien garis lurus pada grafik v-t konstan; jika menanjak, percepatannya positif.' }
+  ],
+  'grand-prix': [
+    { question: 'Luas di bawah grafik kecepatan-waktu menyatakan ...', options: ['Percepatan', 'Perpindahan (jarak jika v ≥ 0)', 'Waktu', 'Kelajuan rata-rata'], answer: 1, formula: 'Δs = luas di bawah grafik v-t', explanation: 'Luas bertanda di bawah grafik kecepatan-waktu menyatakan perpindahan. Jika kecepatan tidak negatif, nilainya juga sama dengan jarak.' },
+    { question: 'Benda bergerak 10 m/s selama 4 s, lalu 5 m/s selama 2 s. Total jaraknya ...', options: ['30 m', '40 m', '50 m', '60 m'], answer: 2, formula: 's total = v₁t₁ + v₂t₂', explanation: 's = (10 × 4) + (5 × 2) = 50 m.' },
+    { question: 'Kecepatan bertambah dari 0 ke 20 m/s selama 5 s. Percepatan rata-ratanya ...', options: ['2 m/s²', '4 m/s²', '5 m/s²', '100 m/s²'], answer: 1, formula: 'a = Δv / Δt', explanation: 'a = (20 − 0) / 5 = 4 m/s².' },
+    { question: 'Grafik v-t berupa garis datar di v = 8 m/s selama 6 s. Perpindahannya ...', options: ['14 m', '24 m', '48 m', '2 m'], answer: 2, formula: 's = v × t', explanation: 'Luas persegi panjang di bawah grafik = 8 × 6 = 48 m.' },
+    { question: 'Mobil dipercepat dari 4 m/s dengan a = 2 m/s² selama 3 s. Jarak yang ditempuh ...', options: ['18 m', '21 m', '24 m', '30 m'], answer: 1, formula: 's = v₀t + ½at²', explanation: 's = 4 × 3 + ½ × 2 × 3² = 12 + 9 = 21 m.' },
+    { question: 'Kecepatan rata-rata untuk menempuh 120 m dalam 10 s adalah ...', options: ['10 m/s', '12 m/s', '1200 m/s', '0,08 m/s'], answer: 1, formula: 'v rata-rata = total jarak / total waktu', explanation: 'v rata-rata = 120 / 10 = 12 m/s.' },
+    { question: 'Pada grafik v-t, gradien garis menyatakan ...', options: ['Perpindahan', 'Percepatan', 'Waktu', 'Jarak total'], answer: 1, formula: 'a = Δv / Δt', explanation: 'Kemiringan grafik kecepatan terhadap waktu adalah percepatan.' },
+    { question: 'Sebuah mobil melaju 15 m/s lalu dipercepat 1 m/s² selama 5 s. Jaraknya ...', options: ['75 m', '87,5 m', '100 m', '125 m'], answer: 1, formula: 's = v₀t + ½at²', explanation: 's = 15 × 5 + ½ × 1 × 25 = 75 + 12,5 = 87,5 m.' },
+    { question: 'Benda menempuh 30 m pada 10 s pertama dan 50 m pada 10 s berikutnya. Kelajuan rata-rata ...', options: ['3 m/s', '4 m/s', '5 m/s', '8 m/s'], answer: 1, formula: 'v rata-rata = s total / t total', explanation: 'v rata-rata = (30 + 50) / 20 = 4 m/s.' },
+    { question: 'Kecepatan awal 6 m/s dan kecepatan akhir 18 m/s dalam 4 s. Jarak jika percepatan konstan ...', options: ['24 m', '36 m', '48 m', '72 m'], answer: 2, formula: 's = ((v₀ + v) / 2) × t', explanation: 'Untuk percepatan konstan, v rata-rata = (6 + 18)/2 = 12 m/s; s = 12 × 4 = 48 m.' }
+  ]
+};
