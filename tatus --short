@@ -1,0 +1,17 @@
+ README.md                                |    6 [32m+[m[31m-[m
+ public/images/hero-physics-adventure.jpg |  Bin [31m839501[m -> [32m648500[m bytes
+ src/data/questions.js                    |   32 [32m+[m[31m-[m
+ src/game/Environment.js                  | 1254 [32m++++++++++++++++++++++++++[m[31m--[m
+ src/game/Game.js                         |  143 [32m+++[m[31m-[m
+ src/game/LevelManager.js                 |   61 [32m+[m[31m-[m
+ src/game/PhysicsEngine.js                |   56 [32m+[m[31m-[m
+ src/game/Player.js                       |  191 [32m++++[m[31m-[m
+ src/game/Vehicle.js                      |  521 [32m+++++++++++[m[31m-[m
+ src/main.js                              |  590 [32m++++++++++++[m[31m--[m
+ src/quiz/QuizManager.js                  |   66 [32m+[m[31m-[m
+ src/style.css                            | 1305 [32m++++++++++++++++++++++++++++[m[31m--[m
+ src/ui/Dashboard.js                      |  228 [32m+++++[m[31m-[m
+ src/ui/Evaluation.js                     |   34 [32m+[m[31m-[m
+ src/ui/GameHUD.js                        |    1 [32m+[m
+ src/ui/Leaderboard.js                    |    2 [32m+[m[31m-[m
+ 16 files changed, 4151 insertions(+), 339 deletions(-)

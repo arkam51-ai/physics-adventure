@@ -1,18 +1,20 @@
 import './style.css';
 import { Dashboard } from './ui/Dashboard.js';
 import { GameHUD } from './ui/GameHUD.js';
-import { Game } from './game/Game.js';
 import { LevelManager } from './game/LevelManager.js';
 import { QuestionBank } from './quiz/QuestionBank.js';
 import { QuizManager } from './quiz/QuizManager.js';
 
 const STORAGE_KEY = 'physics-adventure-3d-save';
+const CHARACTER_IDS = new Set(['student-male', 'student-female']);
+const isCharacterId = (id) => CHARACTER_IDS.has(id);
 const defaultSave = () => ({
   playerName: 'Petualang',
+  playerCharacterId: null,
   completed: [],
   records: [],
   leaderboard: [],
-  settings: { sound: true, music: false }
+  settings: { sound: true, music: false, musicVolume: 100 }
 });
 
 function loadSave() {
@@ -20,7 +22,10 @@ function loadSave() {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return defaultSave();
     const parsed = JSON.parse(stored);
-    return { ...defaultSave(), ...parsed, settings: { ...defaultSave().settings, ...parsed.settings } };
+    const loaded = { ...defaultSave(), ...parsed, settings: { ...defaultSave().settings, ...parsed.settings } };
+    const musicVolume = Number(loaded.settings.musicVolume);
+    loaded.settings.musicVolume = Number.isFinite(musicVolume) ? Math.min(100, Math.max(0, musicVolume)) : 100;
+    return loaded;
   } catch (error) {
     console.warn('Progres lokal tidak dapat dibaca; progres baru akan digunakan.', error);
     return defaultSave();
@@ -32,43 +37,309 @@ const dashboard = new Dashboard(root);
 const levels = new LevelManager();
 const quiz = new QuizManager(new QuestionBank());
 const save = loadSave();
+const LEVEL_IDS = levels.getLevels().map((level) => level.id);
 let game = null;
 let hud = null;
+let gameLoadToken = 0;
 let selectedMode = 'single';
 let selectedLevel = levels.getLevels()[0];
 let playerNames = [save.playerName, 'Teman'];
+let selectedCharacterId = isCharacterId(save.playerCharacterId) ? save.playerCharacterId : null;
+let playerCharacterIds = [selectedCharacterId, null];
+let localCharacterIds = [null, null];
+let localPlayerNames = [save.playerName, 'Teman'];
+let localSetupStage = null;
 let currentTurn = 0;
 let currentScore = 0;
 let correctCoins = 0;
 let checkpointQuizOpen = false;
+let checkpointPassed = false;
+let levelFinished = false;
+let gameplayActive = false;
+let checkpointTimer = null;
+let checkpointDeadline = 0;
+const journeyScores = [0, 0];
 let lastGameState = { distance: 0, speed: 0, acceleration: 0, elapsed: 0, coins: 0 };
 let returnPage = () => showHome();
+let routeLoadingView = null;
+let journeySequence = 0;
+let attemptSequence = 0;
+
+function createRouteLoadingView() {
+  const screen = root.querySelector('.game-screen');
+  if (!screen) return null;
+
+  screen.classList.add('is-route-loading');
+  const overlay = document.createElement('div');
+  overlay.className = 'route-loading-overlay';
+  overlay.setAttribute('role', 'progressbar');
+  overlay.setAttribute('aria-label', 'Progres pemuatan');
+  overlay.setAttribute('aria-valuemin', '0');
+  overlay.setAttribute('aria-valuemax', '100');
+
+  const percentage = document.createElement('span');
+  percentage.className = 'route-loading-percentage';
+  const track = document.createElement('div');
+  track.className = 'route-loading-track';
+  track.setAttribute('aria-hidden', 'true');
+  const fill = document.createElement('div');
+  fill.className = 'route-loading-fill';
+  track.append(fill);
+  overlay.append(percentage, track);
+  root.append(overlay);
+
+  let lastPercent = 0;
+  const setProgress = (event = {}) => {
+    if (overlay.classList.contains('is-error')) return;
+    const reported = Number(event.percent);
+    const value = Number.isFinite(reported) ? Math.max(0, Math.min(100, Math.floor(reported))) : 0;
+    lastPercent = Math.max(lastPercent, value);
+    percentage.textContent = `${lastPercent}%`;
+    fill.style.width = `${lastPercent}%`;
+    overlay.setAttribute('aria-valuenow', String(lastPercent));
+  };
+  const reset = () => {
+    lastPercent = 0;
+    overlay.style.backgroundColor = '';
+    overlay.classList.remove('is-error');
+    overlay.setAttribute('role', 'progressbar');
+    overlay.setAttribute('aria-label', 'Progres pemuatan');
+    overlay.setAttribute('aria-valuemin', '0');
+    overlay.setAttribute('aria-valuemax', '100');
+    overlay.replaceChildren(percentage, track);
+    setProgress({ percent: 0 });
+  };
+  const beginCommit = () => {
+    if (!overlay.classList.contains('is-error')) {
+      overlay.style.backgroundColor = '';
+    }
+  };
+  const showError = (retry, back) => {
+    overlay.classList.add('is-error');
+    overlay.setAttribute('role', 'alert');
+    overlay.removeAttribute('aria-label');
+    const message = document.createElement('p');
+    message.className = 'route-loading-error-message';
+    message.textContent = 'Persiapan permainan gagal.';
+    const actions = document.createElement('div');
+    actions.className = 'route-loading-error-actions';
+    const retryButton = document.createElement('button');
+    retryButton.className = 'route-loading-retry';
+    retryButton.type = 'button';
+    retryButton.textContent = 'Coba lagi';
+    retryButton.addEventListener('click', retry, { once: true });
+    const backButton = document.createElement('button');
+    backButton.className = 'route-loading-back';
+    backButton.type = 'button';
+    backButton.textContent = 'Pilih level';
+    backButton.addEventListener('click', back, { once: true });
+    actions.append(retryButton, backButton);
+    overlay.replaceChildren(message, actions);
+    overlay.removeAttribute('aria-valuenow');
+  };
+  const close = () => {
+    screen.classList.remove('is-route-loading');
+    overlay.remove();
+  };
+
+  reset();
+  return { reset, setProgress, beginCommit, showError, close };
+}
+
+function closeRouteLoadingView() {
+  routeLoadingView?.close();
+  routeLoadingView = null;
+}
+
+const activeJourney = {
+  mode: 'single',
+  players: [
+    {
+      turn: 0,
+      name: null,
+      journeyId: null,
+      status: 'idle',
+      pendingNewJourney: false,
+      completedLevels: [],
+      rewardedCheckpoints: [],
+      grandVictoryShown: false
+    },
+    {
+      turn: 1,
+      name: null,
+      journeyId: null,
+      status: 'idle',
+      pendingNewJourney: false,
+      completedLevels: [],
+      rewardedCheckpoints: [],
+      grandVictoryShown: false
+    }
+  ],
+  currentAttempt: null
+};
+
+function createRuntimeId(prefix, sequence) {
+  return `${prefix}-${Date.now()}-${sequence}`;
+}
+
+function getJourneyPlayer(turn = currentTurn) {
+  return activeJourney.players[turn];
+}
+
+function resetJourneyPlayer(turn, name, pendingNewJourney) {
+  activeJourney.players[turn] = {
+    turn,
+    name,
+    journeyId: null,
+    status: 'idle',
+    pendingNewJourney,
+    completedLevels: [],
+    rewardedCheckpoints: [],
+    grandVictoryShown: false
+  };
+}
+
+function getNextLevelId(playerJourney) {
+  if (!playerJourney) return null;
+  const completedCount = playerJourney.completedLevels.length;
+  return completedCount < LEVEL_IDS.length ? LEVEL_IDS[completedCount] : null;
+}
+
+function hasCompletedFullJourney(playerJourney) {
+  if (!playerJourney || playerJourney.completedLevels.length !== LEVEL_IDS.length) return false;
+  return playerJourney.completedLevels.every((entry, index) => entry.levelId === LEVEL_IDS[index]);
+}
+
+function recordJourneyLevel(levelId, checkpointPassedForLevel, runToken) {
+  const attempt = activeJourney.currentAttempt;
+  const playerJourney = attempt ? getJourneyPlayer(attempt.turn) : null;
+  if (!attempt || attempt.finalized || attempt.runToken !== runToken) return false;
+  if (attempt.turn !== currentTurn || attempt.levelId !== levelId) return false;
+  if (!playerJourney || playerJourney.turn !== currentTurn) return false;
+  if (!playerJourney.journeyId || playerJourney.journeyId !== attempt.journeyId) return false;
+  if (playerJourney.name !== attempt.playerName || playerJourney.status !== 'active') return false;
+  if (attempt.classification === 'replay') return false;
+  if (playerJourney.completedLevels.length >= LEVEL_IDS.length) return false;
+  if (getNextLevelId(playerJourney) !== levelId) return false;
+
+  playerJourney.completedLevels.push({
+    levelId,
+    checkpointPassed: checkpointPassedForLevel,
+    completedAt: Date.now()
+  });
+  return true;
+}
+
+function createCheckpointReward({ perfect, attempt }) {
+  const currentAttempt = activeJourney.currentAttempt;
+  const playerJourney = currentAttempt ? getJourneyPlayer(currentAttempt.turn) : null;
+  if (!currentAttempt || currentAttempt.classification === 'replay') return null;
+  if (!playerJourney || playerJourney.journeyId !== currentAttempt.journeyId) return null;
+  if (playerJourney.status !== 'active') return null;
+
+  const rewardKey = `${playerJourney.journeyId}:${currentAttempt.levelId}`;
+  if (playerJourney.rewardedCheckpoints.some((entry) => entry.key === rewardKey)) return null;
+
+  const type = perfect ? 'perfect' : attempt > 1 ? 'comeback' : 'checkpoint';
+  const reward = {
+    key: rewardKey,
+    type,
+    levelId: currentAttempt.levelId,
+    journeyId: playerJourney.journeyId,
+    playerTurn: currentAttempt.turn
+  };
+  playerJourney.rewardedCheckpoints.push(reward);
+  currentAttempt.checkpointReward = reward;
+  return reward;
+}
 
 class SoundEffects {
   constructor() {
     this.context = null;
-    this.musicTimer = null;
-    this.note = 0;
+    this.effectsGain = null;
+    this.resumePromise = null;
+    this.engineAudio = null;
+    this.engineTargetSpeed = 0;
+    this.musicAudio = null;
+    this.musicPlayPromise = null;
+    this.musicRequestId = 0;
+    this.musicRequested = false;
+    this.musicUnlocked = false;
+    this.musicStatus = 'idle';
+  }
+
+  activate() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return Promise.resolve(false);
+    try {
+      this.context ??= new AudioContextClass();
+      this.ensureOutputBuses();
+      if (this.context.state === 'running') return Promise.resolve(true);
+      if (!this.resumePromise) {
+        this.resumePromise = this.context.resume()
+          .then(() => this.context?.state === 'running')
+          .catch((error) => {
+            console.warn('Audio tidak dapat diaktifkan.', error);
+            return false;
+          })
+          .finally(() => {
+            this.resumePromise = null;
+          });
+      }
+      return this.resumePromise;
+    } catch (error) {
+      console.warn('Audio tidak tersedia di browser ini.', error);
+      return Promise.resolve(false);
+    }
+  }
+
+  ensureOutputBuses() {
+    if (!this.context || this.effectsGain) return;
+    this.effectsGain = this.context.createGain();
+    this.effectsGain.gain.value = save.settings.sound ? 1 : 0;
+    this.effectsGain.connect(this.context.destination);
+  }
+
+  setSoundEnabled(enabled) {
+    if (this.context) {
+      this.ensureOutputBuses();
+      this.effectsGain.gain.setTargetAtTime(enabled ? 1 : 0, this.context.currentTime, 0.03);
+    }
+    if (!enabled) this.stopEngine();
+  }
+
+  setMusicVolume(volume) {
+    const percent = Math.min(100, Math.max(0, Number(volume) || 0));
+    if (this.musicAudio) this.musicAudio.volume = percent / 100;
   }
 
   tone(frequency, duration = 0.12, type = 'sine', volume = 0.08) {
-    if (!save.settings.sound) return;
-    try {
-      this.context ??= new AudioContext();
-      if (this.context.state === 'suspended') this.context.resume();
-      const oscillator = this.context.createOscillator();
-      const gain = this.context.createGain();
-      oscillator.type = type;
-      oscillator.frequency.value = frequency;
-      gain.gain.setValueAtTime(volume, this.context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, this.context.currentTime + duration);
-      oscillator.connect(gain);
-      gain.connect(this.context.destination);
-      oscillator.start();
-      oscillator.stop(this.context.currentTime + duration);
-    } catch (error) {
-      console.warn('Audio tidak tersedia di browser ini.', error);
-    }
+    if (!save.settings.sound) return Promise.resolve(false);
+    return this.activate().then((active) => {
+      if (!active || !this.context || this.context.state !== 'running') return false;
+      try {
+        const oscillator = this.context.createOscillator();
+        const gain = this.context.createGain();
+        oscillator.type = type;
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(volume, this.context.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.context.currentTime + duration);
+        oscillator.connect(gain);
+        gain.connect(this.effectsGain);
+        console.log('AUDIO TEST:', {
+          state: this.context.state,
+          frequency: oscillator.frequency.value,
+          volume: gain.gain.value,
+          destination: this.context.destination
+      });
+        oscillator.start();
+        oscillator.stop(this.context.currentTime + duration);
+        return true;
+      } catch (error) {
+        console.warn('Audio tidak tersedia di browser ini.', error);
+        return false;
+      }
+    });
   }
 
   coin() {
@@ -80,19 +351,200 @@ class SoundEffects {
     this.tone(correct ? 660 : 240, 0.22, correct ? 'triangle' : 'sine');
   }
 
-  setMusic(enabled) {
-    if (this.musicTimer) window.clearInterval(this.musicTimer);
-    this.musicTimer = null;
-    if (!enabled) return;
-    const notes = [392, 494, 587, 494, 440, 523, 659, 523];
-    this.musicTimer = window.setInterval(() => {
-      if (save.settings.music && save.settings.sound) this.tone(notes[this.note++ % notes.length], 0.32, 'sine', 0.018);
-    }, 420);
-    this.tone(392, 0.32, 'sine', 0.018);
+  reward(type) {
+    const notes = type === 'perfect' ? [660, 784, 988] : type === 'comeback' ? [523, 659, 784] : [523, 659];
+    notes.forEach((note, index) => window.setTimeout(() => this.tone(note, 0.18, 'triangle', 0.045), index * 90));
+  }
+
+  grandVictory() {
+    [523, 659, 784, 1047].forEach((note, index) => window.setTimeout(() => this.tone(note, 0.24, 'triangle', 0.055), index * 110));
+  }
+
+  ensureMusicAudio() {
+    if (this.musicAudio) return this.musicAudio;
+    try {
+      const audio = new Audio(`${import.meta.env.BASE_URL}audio/backgroundmusicmaster-pixel-adventure-382649.mp3`);
+      audio.preload = 'none';
+      audio.loop = true;
+      audio.volume = Math.min(100, Math.max(0, Number(save.settings.musicVolume) || 0)) / 100;
+      audio.addEventListener('playing', () => { this.musicStatus = 'playing'; });
+      audio.addEventListener('pause', () => { this.musicStatus = 'paused'; });
+      audio.addEventListener('error', () => {
+        this.musicStatus = 'error';
+        console.warn('File musik latar tidak dapat dimuat.', audio.error);
+      });
+      this.musicAudio = audio;
+      return audio;
+    } catch (error) {
+      this.musicStatus = 'error';
+      console.warn('Audio musik latar tidak tersedia di browser ini.', error);
+      return null;
+    }
+  }
+
+  isMusicPlaying() {
+    return Boolean(this.musicAudio && !this.musicAudio.paused && !this.musicAudio.ended);
+  }
+
+  setMusic(enabled, userInitiated = false) {
+    const shouldPlay = Boolean(enabled && save.settings.music && !gameplayActive);
+    this.musicRequested = shouldPlay;
+
+    if (!shouldPlay) {
+      this.musicRequestId += 1;
+      this.musicPlayPromise = null;
+      if (this.musicAudio) this.musicAudio.pause();
+      this.musicStatus = 'paused';
+      return Promise.resolve(false);
+    }
+
+    if (userInitiated) this.musicUnlocked = true;
+    if (!this.musicUnlocked) {
+      this.musicStatus = 'awaiting-user-gesture';
+      return Promise.resolve(false);
+    }
+
+    const audio = this.ensureMusicAudio();
+    if (!audio) return Promise.resolve(false);
+    this.setMusicVolume(save.settings.musicVolume);
+    if (this.isMusicPlaying()) {
+      this.musicStatus = 'playing';
+      return Promise.resolve(true);
+    }
+    if (this.musicPlayPromise) return this.musicPlayPromise;
+
+    const requestId = ++this.musicRequestId;
+    this.musicStatus = 'starting';
+    let playAttempt;
+    try {
+      playAttempt = audio.play();
+    } catch (error) {
+      this.musicStatus = error.name === 'NotAllowedError' ? 'blocked' : 'error';
+      if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') {
+        console.warn('Musik latar tidak dapat diputar.', error);
+      }
+      return Promise.resolve(false);
+    }
+
+    let pendingPlay;
+    pendingPlay = Promise.resolve(playAttempt).then(() => {
+      if (requestId !== this.musicRequestId || !this.musicRequested) {
+        if (!this.musicRequested) audio.pause();
+        return false;
+      }
+      const confirmed = !audio.paused && !audio.ended;
+      this.musicStatus = confirmed ? 'playing' : 'paused';
+      return confirmed;
+    }, (error) => {
+      if (requestId === this.musicRequestId) {
+        this.musicStatus = error.name === 'NotAllowedError' ? 'blocked' : 'error';
+        if (error.name !== 'NotAllowedError' && error.name !== 'AbortError') {
+          console.warn('Musik latar tidak dapat diputar.', error);
+        }
+      }
+      return false;
+    }).finally(() => {
+      if (this.musicPlayPromise === pendingPlay) this.musicPlayPromise = null;
+    });
+    this.musicPlayPromise = pendingPlay;
+    return pendingPlay;
+  }
+  updateEngine(speed) {
+    if (!save.settings.sound) {
+      this.stopEngine();
+      return;
+    }
+
+    const safeSpeed = Math.max(0, Number(speed) || 0);
+    this.engineTargetSpeed = safeSpeed;
+
+    if (safeSpeed <= 0.1) {
+      if (this.engineAudio) {
+        this.engineAudio.gain.gain.setTargetAtTime(
+          0,
+          this.context.currentTime,
+          0.25
+        );
+      }
+      return;
+    }
+
+    this.activate().then((active) => {
+      if (!active || !save.settings.sound || this.engineTargetSpeed <= 0.1) return;
+
+      if (!this.engineAudio) {
+        const oscillator = this.context.createOscillator();
+        const gain = this.context.createGain();
+
+        oscillator.type = 'sawtooth';
+        oscillator.frequency.value = 55;
+        gain.gain.value = 0;
+
+        oscillator.connect(gain);
+        gain.connect(this.effectsGain);
+        oscillator.start();
+
+        this.engineAudio = { oscillator, gain };
+      }
+
+      const engine = this.engineAudio;
+      if (!engine || this.context.state !== 'running') return;
+
+      engine.oscillator.frequency.setTargetAtTime(
+        55 + Math.min(safeSpeed * 7, 180),
+        this.context.currentTime,
+        0.08
+      );
+
+      engine.gain.gain.setTargetAtTime(
+        Math.min(0.12, safeSpeed * 0.002),
+        this.context.currentTime,
+        0.08
+      );
+    });
+  }
+
+  stopEngine() {
+  this.engineTargetSpeed = 0;
+  const engine = this.engineAudio;
+    if (!engine || !this.context) return;
+
+    this.engineAudio = null;
+
+    const now = this.context.currentTime;
+    engine.gain.gain.cancelScheduledValues(now);
+    engine.gain.gain.setTargetAtTime(0, now, 0.04);
+
+    engine.oscillator.stop(now + 0.2);
+    window.setTimeout(() => {
+      engine.oscillator.disconnect();
+      engine.gain.disconnect();
+    }, 250);
   }
 }
 
 const sound = new SoundEffects();
+window.sound = sound;
+const syncMusicPlayback = (userInitiated = false) => sound.setMusic(save.settings.music && !gameplayActive, userInitiated);
+window.audioDebug = async () => {
+  const activated = await sound.activate();
+
+  return {
+    activated,
+    sound: save.settings.sound,
+    music: save.settings.music,
+    context: sound.context?.state,
+    musicPlaying: sound.isMusicPlaying(),
+    musicStatus: sound.musicStatus
+  };
+};
+const activateAudio = () => {
+  if (!save.settings.sound && !save.settings.music) return;
+  if (save.settings.sound) sound.activate();
+  if (save.settings.music && !gameplayActive) sound.setMusic(true, true);
+};
+window.addEventListener('pointerdown', activateAudio, { passive: true });
+window.addEventListener('touchstart', activateAudio, { passive: true });
 
 function persist() {
   try {
@@ -104,80 +556,259 @@ function persist() {
 }
 
 function showHome() {
+  gameplayActive = false;
   destroyGame();
+  localSetupStage = null;
   returnPage = showHome;
   dashboard.home({
     playerName: save.playerName,
+    selectedCharacterId,
     bestScore: Math.max(0, ...save.records.map((record) => record.score))
   });
+  syncMusicPlayback();
 }
 
 function showLevels() {
+  gameplayActive = false;
   destroyGame();
-  returnPage = showLevels;
+  returnPage = showDashboard;
   dashboard.levels({
     levels: levels.getLevels(),
     completed: save.completed
   });
+  syncMusicPlayback();
+}
+
+function showDashboard() {
+  gameplayActive = false;
+  destroyGame();
+  localSetupStage = null;
+  returnPage = showDashboard;
+  const playerRecords = save.records.filter((record) => record.playerName === save.playerName);
+  const scores = playerRecords.map((record) => Number(record.score) || 0);
+  dashboard.dashboard({
+    playerName: save.playerName,
+    playerCharacterId: save.playerCharacterId,
+    settings: save.settings,
+    bestScore: Math.max(0, ...scores),
+    totalPoints: scores.reduce((total, score) => total + score, 0),
+    completedCount: save.completed.length
+  });
+  syncMusicPlayback();
 }
 
 function destroyGame() {
-  if (!game) return;
+  clearCheckpointTimer();
+  gameLoadToken += 1;
+  activeJourney.currentAttempt = null;
+  closeRouteLoadingView();
+  if (!game) {
+    hud = null;
+    return;
+  }
   game.destroy();
   game = null;
   hud = null;
-  sound.setMusic(false);
 }
 
 function startMode(mode) {
   selectedMode = mode;
-  dashboard.chooseMode(mode, { playerName: save.playerName });
+  if (mode === 'single') {
+    localSetupStage = null;
+    if (!isCharacterId(selectedCharacterId)) {
+      dashboard.notice('Pilih karakter terlebih dahulu.');
+      return;
+    }
+    let hasSavedPlayerName = false;
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      hasSavedPlayerName = typeof JSON.parse(stored)?.playerName === 'string';
+    } catch {}
+    dashboard.nameInput({ playerName: save.playerName, isNewPlayer: !hasSavedPlayerName });
+    return;
+  }
+  localCharacterIds = [null, null];
+  localPlayerNames = [save.playerName, 'Teman'];
+  localSetupStage = 0;
+  dashboard.localCharacterChoice(0, localCharacterIds[0]);
 }
 
 function confirmMode() {
   const first = root.querySelector('#player-name')?.value.trim();
-  const second = root.querySelector('#player-two')?.value.trim();
   if (!first) {
     dashboard.notice('Nama pemain perlu diisi.');
     return;
   }
-  playerNames = [first, second || 'Teman'];
+  if (!isCharacterId(selectedCharacterId)) {
+    dashboard.notice('Pilih karakter terlebih dahulu.');
+    return;
+  }
+  playerNames = [first, 'Teman'];
+  playerCharacterIds = [selectedCharacterId, null];
+  journeyScores[0] = 0;
+  journeyScores[1] = 0;
+  activeJourney.mode = selectedMode;
+  resetJourneyPlayer(0, playerNames[0], true);
+  resetJourneyPlayer(1, playerNames[1], selectedMode === 'local');
+  activeJourney.currentAttempt = null;
   save.playerName = first;
+  save.playerCharacterId = selectedCharacterId;
   persist();
-  showLevels();
+  showDashboard();
 }
 
-function startLevel(levelId, turn = 0) {
+function advanceLocalSetup() {
+  if (localSetupStage === 0 || localSetupStage === 2) {
+    const playerIndex = localSetupStage === 0 ? 0 : 1;
+    if (!isCharacterId(localCharacterIds[playerIndex])) {
+      dashboard.notice(`Pemain ${playerIndex + 1}, pilih karakter terlebih dahulu.`);
+      return;
+    }
+    localSetupStage += 1;
+    dashboard.localPlayerName(playerIndex, localPlayerNames[playerIndex]);
+    return;
+  }
+
+  if (localSetupStage === 1 || localSetupStage === 3) {
+    const playerIndex = localSetupStage === 1 ? 0 : 1;
+    const enteredName = root.querySelector(playerIndex === 0 ? '#player-name' : '#player-two')?.value.trim();
+    if (playerIndex === 0 && !enteredName) {
+      dashboard.notice('Nama pemain perlu diisi.');
+      return;
+    }
+    localPlayerNames[playerIndex] = enteredName || 'Teman';
+    if (playerIndex === 0) {
+      localSetupStage = 2;
+      dashboard.localCharacterChoice(1, localCharacterIds[1]);
+      return;
+    }
+
+    playerNames = [...localPlayerNames];
+    playerCharacterIds = [...localCharacterIds];
+    journeyScores[0] = 0;
+    journeyScores[1] = 0;
+    activeJourney.mode = 'local';
+    resetJourneyPlayer(0, playerNames[0], true);
+    resetJourneyPlayer(1, playerNames[1], true);
+    activeJourney.currentAttempt = null;
+    save.playerName = playerNames[0];
+    save.playerCharacterId = playerCharacterIds[0];
+    selectedCharacterId = playerCharacterIds[0];
+    persist();
+    localSetupStage = null;
+    showDashboard();
+  }
+}
+
+function startLevel(levelId, turn = 0, origin = 'select-level') {
+  gameplayActive = true;
+  syncMusicPlayback();
   selectedLevel = levels.getLevel(levelId);
+  const level = selectedLevel;
   currentTurn = turn;
   currentScore = 0;
   correctCoins = 0;
   checkpointQuizOpen = false;
+  checkpointPassed = false;
+  levelFinished = false;
   lastGameState = { distance: 0, speed: 0, acceleration: 0, elapsed: 0, coins: 0 };
   quiz.start(selectedLevel.id);
   destroyGame();
+  const playerJourney = getJourneyPlayer(turn);
+  const firstLevelId = LEVEL_IDS[0];
+  let classification = 'replay';
+
+  if (playerJourney && playerJourney.pendingNewJourney && level.id === firstLevelId) {
+    journeySequence += 1;
+    playerJourney.journeyId = createRuntimeId('journey', journeySequence);
+    playerJourney.status = 'active';
+    playerJourney.pendingNewJourney = false;
+    playerJourney.completedLevels = [];
+    playerJourney.rewardedCheckpoints = [];
+    playerJourney.grandVictoryShown = false;
+    classification = 'newJourney';
+  } else if (
+    playerJourney &&
+    playerJourney.status === 'active' &&
+    playerJourney.journeyId &&
+    getNextLevelId(playerJourney) === level.id
+  ) {
+    classification = 'continuation';
+  }
+
+  if (classification === 'newJourney') journeyScores[currentTurn] = 0;
+
+  const runToken = gameLoadToken;
+  attemptSequence += 1;
+  activeJourney.currentAttempt = {
+    attemptId: createRuntimeId('attempt', attemptSequence),
+    runToken,
+    turn,
+    playerName: playerNames[turn],
+    journeyId: playerJourney?.journeyId || null,
+    levelId: level.id,
+    classification,
+    origin,
+    finalized: false
+  };
   dashboard.game(selectedLevel, playerNames[currentTurn], currentTurn, selectedMode);
+  routeLoadingView = createRouteLoadingView();
   const canvas = root.querySelector('#game-canvas');
-  hud = new GameHUD(root);
-  game = new Game(canvas, {
-    onUpdate: (state) => {
-      lastGameState = state;
-      hud.update(state);
-    },
-    onCoin: (coins) => {
-      sound.coin();
-      dashboard.notice(`Koin terkumpul: ${coins} 🪙`);
-    },
-    onObstacle: () => dashboard.notice('Rintangan! Atur jalur dan kecepatan.'),
-    onCheckpoint: (index) => {
-      checkpointQuizOpen = true;
-      dashboard.question(quiz.getCurrent(), index, quiz.total);
-    },
-    onPauseRequest: togglePause,
-    onFinish: finishLevel
+  const loadToken = gameLoadToken;
+  hud = new GameHUD(root, selectedLevel.maxSpeed);
+  import('./game/Game.js').then(({ Game }) => {
+    if (loadToken !== gameLoadToken || !canvas.isConnected) return;
+    game = new Game(canvas, {
+  onUpdate: (state) => {
+    lastGameState = state;
+    hud?.update(state);
+    sound.updateEngine((checkpointQuizOpen || levelFinished) ? 0 : state.speed);
+  },
+      onCoin: (coins) => {
+        sound.coin();
+        dashboard.notice(`Koin terkumpul: ${coins} 🪙`, { kind: 'coin' });
+      },
+      onObstacle: () => {
+        currentScore -= 100;
+        dashboard.notice('Rintangan! −100 poin. Atur jalur dan kecepatan.', { kind: 'obstacle' });
+      },
+      onCheckpoint: () => {
+        checkpointQuizOpen = true;
+        quiz.startAttempt();
+        startCheckpointTimer();
+      },
+      onPauseRequest: togglePause,
+      onFinish: () => finishLevel(runToken),
+      onLoadingStart: () => routeLoadingView?.reset(),
+      onLoadingProgress: (progress) => routeLoadingView?.setProgress(progress),
+      onLoadingCommitStart: () => routeLoadingView?.beginCommit(),
+      onLoadingReady: closeRouteLoadingView,
+      onLoadingDismiss: closeRouteLoadingView,
+      onLoadingError: (error) => {
+        console.error('Persiapan permainan gagal.', error);
+        routeLoadingView?.showError(
+          () => game?.start(level),
+          () => showLevels()
+        );
+      }
+    });
+    syncMusicPlayback();
+    game.start(level).catch((error) => {
+      if (loadToken !== gameLoadToken) return;
+      console.error('Persiapan permainan gagal.', error);
+      routeLoadingView?.showError(
+        () => game?.start(level),
+        () => showLevels()
+      );
+    });
+  }).catch((error) => {
+    if (loadToken !== gameLoadToken) return;
+    console.error('Scene gim 3D tidak dapat dimulai.', error);
+    routeLoadingView?.showError(
+      () => startLevel(level.id, turn, origin),
+      () => showLevels()
+    );
   });
-  if (save.settings.music) sound.setMusic(true);
-  game.start(selectedLevel);
 }
 
 function togglePause() {
@@ -188,45 +819,169 @@ function togglePause() {
 }
 
 function answerQuestion(option) {
+  if (!checkpointQuizOpen || !checkpointTimer || quiz.attemptComplete) return;
   const result = quiz.answer(option);
   sound.answer(result.correct);
   if (result.correct) {
-    currentScore += 100;
+    currentScore += 150;
     correctCoins += 5;
-  }
-  dashboard.answerFeedback(result);
+  } else currentScore -= 50;
+  if (quiz.attemptComplete) clearCheckpointTimer();
+  dashboard.answerFeedback(
+    result,
+    quiz.attemptComplete ? 'Lihat hasil percobaan →' : 'Lanjut ke soal berikutnya →',
+    remainingCheckpointTime()
+  );
 }
 
-function resumeAfterAnswer() {
+function clearCheckpointTimer() {
+  if (checkpointTimer) window.clearInterval(checkpointTimer);
+  checkpointTimer = null;
+}
+
+function remainingCheckpointTime() {
+  return Math.max(0, Math.ceil((checkpointDeadline - Date.now()) / 1000));
+}
+
+function renderCheckpointQuestion() {
+  const question = quiz.getCurrent();
+  dashboard.question(
+    question,
+    quiz.attemptIndex,
+    quiz.total,
+    quiz.attempt,
+    remainingCheckpointTime()
+  );
+  quiz.recordQuestionDisplayed(question);
+}
+
+function startCheckpointTimer() {
+  clearCheckpointTimer();
+  checkpointDeadline = Date.now() + selectedLevel.checkpointTime * 1000;
+  renderCheckpointQuestion();
+  checkpointTimer = window.setInterval(() => {
+    const secondsLeft = remainingCheckpointTime();
+    dashboard.updateCheckpointTimer(secondsLeft);
+    if (secondsLeft > 0) return;
+    clearCheckpointTimer();
+    quiz.timeOutAttempt();
+    completeCheckpointAttempt();
+  }, 250);
+}
+
+function continueAfterAnswer() {
+  if (!quiz.attemptComplete) {
+    renderCheckpointQuestion();
+    return;
+  }
+  completeCheckpointAttempt();
+}
+
+function completeCheckpointAttempt() {
+  clearCheckpointTimer();
+  if (quiz.attemptPassed) {
+    checkpointPassed = true;
+    currentScore += 200;
+    const perfect = quiz.attempt === 1 && quiz.attemptCorrect === quiz.total;
+    if (perfect) currentScore += 300;
+    const reward = createCheckpointReward({ perfect, attempt: quiz.attempt });
+    if (reward) sound.reward(reward.type);
+    dashboard.checkpointResult({
+      passed: true,
+      correct: quiz.attemptCorrect,
+      attempt: quiz.attempt,
+      perfect,
+      reward
+    });
+    return;
+  }
+
+  currentScore -= 50;
+  const canRetry = quiz.canRetry;
+  if (!canRetry) currentScore -= 200;
+  dashboard.checkpointResult({
+    passed: false,
+    correct: quiz.attemptCorrect,
+    attempt: quiz.attempt,
+    canRetry
+  });
+}
+
+function retryCheckpoint() {
+  quiz.startAttempt();
+  startCheckpointTimer();
+}
+
+function continueAfterCheckpoint() {
   checkpointQuizOpen = false;
   dashboard.clearModal();
   game?.setPaused(false);
 }
 
-function finishLevel() {
-  sound.setMusic(false);
-  const accuracy = Math.round(quiz.correct / quiz.total * 100);
+function getRank(score) {
+  if (score >= 3000) return 'Ahli Fisika';
+  if (score >= 2000) return 'Adventure';
+  if (score >= 1000) return 'Pengemudi Andal';
+  return 'Penjelajah Pemula';
+}
+
+function finishLevel(runToken) {
+  const attempt = activeJourney.currentAttempt;
+  if (!attempt || attempt.finalized || attempt.runToken !== runToken) return;
+  const resultTurn = attempt.turn;
+
+  clearCheckpointTimer();
+  levelFinished = true;
+  gameplayActive = false;
+  sound.updateEngine(0);
+
+  const accuracy = quiz.answered ? Math.round(quiz.correct / quiz.answered * 100) : 0;
+  const score = currentScore + lastGameState.coins * 10;
+  journeyScores[currentTurn] += score;
   const result = {
-    playerName: playerNames[currentTurn],
+    playerName: playerNames[resultTurn],
+    playerCharacterId: playerCharacterIds[resultTurn] || null,
     level: selectedLevel,
     mode: selectedMode,
-    score: currentScore + lastGameState.coins * 10,
+    score,
+    journeyScore: journeyScores[currentTurn],
+    rank: getRank(journeyScores[currentTurn]),
     correct: quiz.correct,
     wrong: quiz.wrong,
+    answered: quiz.answered,
     accuracy,
-    average: Math.round(currentScore / quiz.total),
+    checkpointPassed,
+    attempts: quiz.attempt,
+    perfect: checkpointPassed && quiz.attempt === 1 && quiz.attemptCorrect === quiz.total,
     elapsed: lastGameState.elapsed,
     coins: lastGameState.coins + correctCoins,
     missedTopics: quiz.missedTopics,
-    nextPlayer: selectedMode === 'local' && currentTurn === 0
+    nextPlayer: selectedMode === 'local' && currentTurn === 0,
+    checkpointReward: attempt.checkpointReward || null,
+    grandVictory: false
   };
+  const recordedJourneyLevel = recordJourneyLevel(selectedLevel.id, result.checkpointPassed, runToken);
+  attempt.finalized = true;
+
+  if (recordedJourneyLevel) {
+    const playerJourney = getJourneyPlayer(attempt.turn);
+    if (hasCompletedFullJourney(playerJourney) && !playerJourney.grandVictoryShown) {
+      playerJourney.grandVictoryShown = true;
+      playerJourney.status = 'completed';
+      result.grandVictory = true;
+      sound.grandVictory();
+    }
+  }
+
   save.completed = [...new Set([...save.completed, selectedLevel.id])];
   save.records.push({
     playerName: result.playerName,
+    playerCharacterId: result.playerCharacterId,
     levelId: selectedLevel.id,
     levelName: selectedLevel.name,
     score: result.score,
     accuracy: result.accuracy,
+    checkpointPassed: result.checkpointPassed,
     date: new Date().toISOString()
   });
   save.leaderboard.push({
@@ -236,11 +991,9 @@ function finishLevel() {
     date: new Date().toISOString()
   });
   persist();
-  dashboard.evaluation(result);
-  const completedGame = game;
-  window.setTimeout(() => {
-    if (game === completedGame) destroyGame();
-  }, 0);
+  game?.freeze();
+  dashboard.evaluation(result, game?.canvas);
+  syncMusicPlayback();
 }
 
 function updateSimulation() {
@@ -304,32 +1057,82 @@ root.addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button || button.disabled) return;
   const { action } = button.dataset;
+  if (root.querySelector('.results-shell') && game?.frozen) destroyGame();
   if (action !== 'answer') sound.tone(520, 0.05, 'sine', 0.025);
   switch (action) {
     case 'home': showHome(); break;
     case 'start': startMode('single'); break;
-    case 'guide': returnPage = showHome; dashboard.guide(); break;
+    case 'guide': returnPage = showDashboard; dashboard.guide(); break;
+    case 'game-info': returnPage = showDashboard; dashboard.gameInfo(); break;
     case 'levels': showLevels(); break;
     case 'select-level':
-      if (selectedMode === 'local' && save.completed.length === 0 && button.dataset.level !== levels.getLevels()[0].id) {
-        dashboard.notice('Selesaikan Level 1 untuk membuka lintasan berikutnya.');
-      } else startLevel(button.dataset.level);
+      {
+        const selectedIndex = levels.getLevels().findIndex((level) => level.id === button.dataset.level);
+        const previousLevel = levels.getLevels()[selectedIndex - 1];
+        if (previousLevel && !save.completed.includes(previousLevel.id)) {
+          dashboard.notice(`Selesaikan Level 0${selectedIndex} untuk membuka lintasan berikutnya.`);
+        } else startLevel(button.dataset.level, 0, 'select-level');
+      }
       break;
     case 'local-mode': startMode('local'); break;
     case 'confirm-mode': confirmMode(); break;
-    case 'materials': returnPage = showHome; dashboard.materials(); updateSimulation(); break;
-    case 'settings': returnPage = showHome; dashboard.settings(save); break;
+    case 'choose-character': {
+      const characterId = button.dataset.characterId;
+      if (!isCharacterId(characterId)) break;
+      const playerIndex = button.hasAttribute('data-player-index') ? Number(button.dataset.playerIndex) : null;
+      if (playerIndex === 0 || playerIndex === 1) {
+        localCharacterIds[playerIndex] = characterId;
+        dashboard.setCharacterSelection(characterId, playerIndex);
+      } else {
+        selectedCharacterId = characterId;
+        dashboard.setCharacterSelection(characterId);
+      }
+      break;
+    }
+    case 'local-next': advanceLocalSetup(); break;
+    case 'materials': returnPage = showDashboard; dashboard.materials(); updateSimulation(); break;
+    case 'settings': returnPage = showDashboard; dashboard.settings(save); break;
     case 'profile': returnPage = showHome; dashboard.profile({ ...save, levels: levels.getLevels() }); break;
-    case 'history': returnPage = showHome; dashboard.history(save.records); break;
+    case 'history': {
+      returnPage = showDashboard;
+      const records = save.records.filter((record) => record.playerName === save.playerName);
+      const completedLevelIds = new Set(records.map((record) => record.levelId).filter(Boolean));
+      dashboard.history({
+        records,
+        playerName: save.playerName,
+        playerCharacterId: save.playerCharacterId,
+        bestScore: Math.max(0, ...records.map((record) => Number(record.score) || 0)),
+        totalPoints: records.reduce((total, record) => total + (Number(record.score) || 0), 0),
+        completedCount: completedLevelIds.size
+      });
+      break;
+    }
     case 'leaderboard': returnPage = showHome; dashboard.leaderboard(save.leaderboard); break;
     case 'back': returnPage(); break;
     case 'pause': togglePause(); break;
     case 'resume': dashboard.clearModal(); game?.setPaused(false); break;
     case 'quit': showHome(); break;
+    case 'toggle-audio': {
+      const setting = button.dataset.setting;
+      if (setting !== 'music' && setting !== 'sound') break;
+      save.settings[setting] = !save.settings[setting];
+      persist();
+      if (setting === 'music') sound.setMusic(save.settings.music, true);
+      else sound.setSoundEnabled(save.settings.sound);
+      button.classList.toggle('is-on', save.settings[setting]);
+      button.setAttribute('aria-pressed', String(save.settings[setting]));
+      button.setAttribute('aria-label', `${setting === 'music' ? 'Musik latar' : 'Efek suara'} ${save.settings[setting] ? 'aktif' : 'nonaktif'}`);
+      button.querySelector('.dashboard-audio-state').textContent = save.settings[setting] ? 'ON' : 'OFF';
+      break;
+    }
     case 'answer': answerQuestion(Number(button.dataset.option)); break;
-    case 'continue': resumeAfterAnswer(); break;
-    case 'next-player': startLevel(selectedLevel.id, 1); break;
+    case 'continue': continueAfterAnswer(); break;
+    case 'retry-attempt': retryCheckpoint(); break;
+    case 'continue-checkpoint':
+    case 'continue-after-fail': continueAfterCheckpoint(); break;
+    case 'next-player': startLevel(selectedLevel.id, 1, 'next-player'); break;
   }
+  syncMusicPlayback(true);
 });
 
 root.addEventListener('change', (event) => {
@@ -338,28 +1141,45 @@ root.addEventListener('change', (event) => {
   save.settings[setting] = event.target.checked;
   persist();
   if (setting === 'music') {
-    if (save.settings.music) sound.setMusic(true);
-    else sound.setMusic(false);
+    sound.setMusic(save.settings.music, true);
   }
-  if (setting === 'sound' && !save.settings.sound) sound.setMusic(false);
+  if (setting === 'sound') sound.setSoundEnabled(save.settings.sound);
 });
 
 root.addEventListener('input', (event) => {
   if (event.target.matches('#sim-speed, #sim-time, #sim-v0, #sim-accel, #sim-glbb-time')) updateSimulation();
+  if (event.target.matches('[data-setting="musicVolume"]')) {
+    save.settings.musicVolume = Number(event.target.value);
+    event.target.nextElementSibling.textContent = `${save.settings.musicVolume}%`;
+    sound.setMusicVolume(save.settings.musicVolume);
+    persist();
+    syncMusicPlayback(true);
+  }
 });
 
 const activeControls = new Map();
+const controlPointers = new Map();
 root.addEventListener('pointerdown', (event) => {
   const button = event.target.closest('[data-control]');
   if (!button || !game) return;
   event.preventDefault();
   button.setPointerCapture(event.pointerId);
-  activeControls.set(event.pointerId, button.dataset.control);
-  game.setControl(button.dataset.control, true);
+  const { control } = button.dataset;
+  activeControls.set(event.pointerId, control);
+  if (!controlPointers.has(control)) controlPointers.set(control, new Set());
+  controlPointers.get(control).add(event.pointerId);
+  game.setControl(control, true);
 });
 const releaseControl = (event) => {
   const control = activeControls.get(event.pointerId);
-  if (control) game?.setControl(control, false);
+  if (control) {
+    const pointers = controlPointers.get(control);
+    pointers?.delete(event.pointerId);
+    if (!pointers?.size) {
+      game?.setControl(control, false);
+      controlPointers.delete(control);
+    }
+  }
   activeControls.delete(event.pointerId);
 };
 root.addEventListener('pointerup', releaseControl);

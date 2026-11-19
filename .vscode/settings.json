@@ -1,0 +1,10 @@
+{
+  "files.watcherExclude": {
+    "**/backups/**": true,
+    "**/artifacts/**": true
+  },
+  "search.exclude": {
+    "**/backups/**": true,
+    "**/artifacts/**": true
+  }
+}

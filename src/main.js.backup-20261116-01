@@ -1,0 +1,842 @@
+import './style.css';
+import { Dashboard } from './ui/Dashboard.js';
+import { GameHUD } from './ui/GameHUD.js';
+import { LevelManager } from './game/LevelManager.js';
+import { QuestionBank } from './quiz/QuestionBank.js';
+import { QuizManager } from './quiz/QuizManager.js';
+
+const STORAGE_KEY = 'physics-adventure-3d-save';
+const defaultSave = () => ({
+  playerName: 'Petualang',
+  completed: [],
+  records: [],
+  leaderboard: [],
+  settings: { sound: true, music: false }
+});
+
+function loadSave() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) return defaultSave();
+    const parsed = JSON.parse(stored);
+    return { ...defaultSave(), ...parsed, settings: { ...defaultSave().settings, ...parsed.settings } };
+  } catch (error) {
+    console.warn('Progres lokal tidak dapat dibaca; progres baru akan digunakan.', error);
+    return defaultSave();
+  }
+}
+
+const root = document.querySelector('#app');
+const dashboard = new Dashboard(root);
+const levels = new LevelManager();
+const quiz = new QuizManager(new QuestionBank());
+const save = loadSave();
+const LEVEL_IDS = levels.getLevels().map((level) => level.id);
+let game = null;
+let hud = null;
+let gameLoadToken = 0;
+let selectedMode = 'single';
+let selectedLevel = levels.getLevels()[0];
+let playerNames = [save.playerName, 'Teman'];
+let currentTurn = 0;
+let currentScore = 0;
+let correctCoins = 0;
+let checkpointQuizOpen = false;
+let checkpointPassed = false;
+let levelFinished = false;
+let checkpointTimer = null;
+let checkpointDeadline = 0;
+const journeyScores = [0, 0];
+let lastGameState = { distance: 0, speed: 0, acceleration: 0, elapsed: 0, coins: 0 };
+let returnPage = () => showHome();
+let journeySequence = 0;
+let attemptSequence = 0;
+const activeJourney = {
+  mode: 'single',
+  players: [
+    {
+      turn: 0,
+      name: null,
+      journeyId: null,
+      status: 'idle',
+      pendingNewJourney: false,
+      completedLevels: [],
+      rewardedCheckpoints: [],
+      grandVictoryShown: false
+    },
+    {
+      turn: 1,
+      name: null,
+      journeyId: null,
+      status: 'idle',
+      pendingNewJourney: false,
+      completedLevels: [],
+      rewardedCheckpoints: [],
+      grandVictoryShown: false
+    }
+  ],
+  currentAttempt: null
+};
+
+function createRuntimeId(prefix, sequence) {
+  return `${prefix}-${Date.now()}-${sequence}`;
+}
+
+function getJourneyPlayer(turn = currentTurn) {
+  return activeJourney.players[turn];
+}
+
+function resetJourneyPlayer(turn, name, pendingNewJourney) {
+  activeJourney.players[turn] = {
+    turn,
+    name,
+    journeyId: null,
+    status: 'idle',
+    pendingNewJourney,
+    completedLevels: [],
+    rewardedCheckpoints: [],
+    grandVictoryShown: false
+  };
+}
+
+function getNextLevelId(playerJourney) {
+  if (!playerJourney) return null;
+  const completedCount = playerJourney.completedLevels.length;
+  return completedCount < LEVEL_IDS.length ? LEVEL_IDS[completedCount] : null;
+}
+
+function hasCompletedFullJourney(playerJourney) {
+  if (!playerJourney || playerJourney.completedLevels.length !== LEVEL_IDS.length) return false;
+  return playerJourney.completedLevels.every((entry, index) => entry.levelId === LEVEL_IDS[index]);
+}
+
+function recordJourneyLevel(levelId, checkpointPassedForLevel, runToken) {
+  const attempt = activeJourney.currentAttempt;
+  const playerJourney = attempt ? getJourneyPlayer(attempt.turn) : null;
+  if (!attempt || attempt.finalized || attempt.runToken !== runToken) return false;
+  if (attempt.turn !== currentTurn || attempt.levelId !== levelId) return false;
+  if (!playerJourney || playerJourney.turn !== currentTurn) return false;
+  if (!playerJourney.journeyId || playerJourney.journeyId !== attempt.journeyId) return false;
+  if (playerJourney.name !== attempt.playerName || playerJourney.status !== 'active') return false;
+  if (attempt.classification === 'replay') return false;
+  if (playerJourney.completedLevels.length >= LEVEL_IDS.length) return false;
+  if (getNextLevelId(playerJourney) !== levelId) return false;
+
+  playerJourney.completedLevels.push({
+    levelId,
+    checkpointPassed: checkpointPassedForLevel,
+    completedAt: Date.now()
+  });
+  return true;
+}
+
+function createCheckpointReward({ perfect, attempt }) {
+  const currentAttempt = activeJourney.currentAttempt;
+  const playerJourney = currentAttempt ? getJourneyPlayer(currentAttempt.turn) : null;
+  if (!currentAttempt || currentAttempt.classification === 'replay') return null;
+  if (!playerJourney || playerJourney.journeyId !== currentAttempt.journeyId) return null;
+  if (playerJourney.status !== 'active') return null;
+
+  const rewardKey = `${playerJourney.journeyId}:${currentAttempt.levelId}`;
+  if (playerJourney.rewardedCheckpoints.some((entry) => entry.key === rewardKey)) return null;
+
+  const type = perfect ? 'perfect' : attempt > 1 ? 'comeback' : 'checkpoint';
+  const reward = {
+    key: rewardKey,
+    type,
+    levelId: currentAttempt.levelId,
+    journeyId: playerJourney.journeyId,
+    playerTurn: currentAttempt.turn
+  };
+  playerJourney.rewardedCheckpoints.push(reward);
+  currentAttempt.checkpointReward = reward;
+  return reward;
+}
+
+class SoundEffects {
+  constructor() {
+    this.context = null;
+    this.musicTimer = null;
+    this.note = 0;
+    this.resumePromise = null;
+    this.engineAudio = null;
+    this.engineTargetSpeed = 0;
+  }
+
+  activate() {
+    if (!save.settings.sound) return Promise.resolve(false);
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return Promise.resolve(false);
+    try {
+      this.context ??= new AudioContextClass();
+      if (this.context.state === 'running') return Promise.resolve(true);
+      if (!this.resumePromise) {
+        this.resumePromise = this.context.resume()
+          .then(() => this.context?.state === 'running')
+          .catch((error) => {
+            console.warn('Audio tidak dapat diaktifkan.', error);
+            return false;
+          })
+          .finally(() => {
+            this.resumePromise = null;
+          });
+      }
+      return this.resumePromise;
+    } catch (error) {
+      console.warn('Audio tidak tersedia di browser ini.', error);
+      return Promise.resolve(false);
+    }
+  }
+
+  tone(frequency, duration = 0.12, type = 'sine', volume = 0.08) {
+    if (!save.settings.sound) return Promise.resolve(false);
+    return this.activate().then((active) => {
+      if (!active || !this.context || this.context.state !== 'running') return false;
+      try {
+        const oscillator = this.context.createOscillator();
+        const gain = this.context.createGain();
+        oscillator.type = type;
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(volume, this.context.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.context.currentTime + duration);
+        oscillator.connect(gain);
+        gain.connect(this.context.destination);
+        console.log('AUDIO TEST:', {
+          state: this.context.state,
+          frequency: oscillator.frequency.value,
+          volume: gain.gain.value,
+          destination: this.context.destination
+      });
+        oscillator.start();
+        oscillator.stop(this.context.currentTime + duration);
+        return true;
+      } catch (error) {
+        console.warn('Audio tidak tersedia di browser ini.', error);
+        return false;
+      }
+    });
+  }
+
+  coin() {
+    this.tone(880, 0.1);
+    window.setTimeout(() => this.tone(1175, 0.14), 75);
+  }
+
+  answer(correct) {
+    this.tone(correct ? 660 : 240, 0.22, correct ? 'triangle' : 'sine');
+  }
+
+  reward(type) {
+    const notes = type === 'perfect' ? [660, 784, 988] : type === 'comeback' ? [523, 659, 784] : [523, 659];
+    notes.forEach((note, index) => window.setTimeout(() => this.tone(note, 0.18, 'triangle', 0.045), index * 90));
+  }
+
+  grandVictory() {
+    [523, 659, 784, 1047].forEach((note, index) => window.setTimeout(() => this.tone(note, 0.24, 'triangle', 0.055), index * 110));
+  }
+
+  setMusic(enabled) {
+    if (this.musicTimer) window.clearInterval(this.musicTimer);
+    this.musicTimer = null;
+    if (!enabled) return;
+    const notes = [392, 494, 587, 494, 440, 523, 659, 523];
+    this.activate().then((active) => {
+      if (!active || !save.settings.music || !save.settings.sound) return;
+      this.musicTimer = window.setInterval(() => {
+        if (save.settings.music && save.settings.sound) this.tone(notes[this.note++ % notes.length], 0.32, 'sine', 0.018);
+      }, 420);
+      this.tone(392, 0.32, 'sine', 0.018);
+    });
+  }
+  updateEngine(speed) {
+    if (!save.settings.sound) {
+      this.stopEngine();
+      return;
+    }
+
+    const safeSpeed = Math.max(0, Number(speed) || 0);
+    this.engineTargetSpeed = safeSpeed;
+
+    if (safeSpeed <= 0.1) {
+      if (this.engineAudio) {
+        this.engineAudio.gain.gain.setTargetAtTime(
+          0,
+          this.context.currentTime,
+          0.25
+        );
+      }
+      return;
+    }
+
+    this.activate().then((active) => {
+      if (!active || !save.settings.sound || this.engineTargetSpeed <= 0.1) return;
+
+      if (!this.engineAudio) {
+        const oscillator = this.context.createOscillator();
+        const gain = this.context.createGain();
+
+        oscillator.type = 'sawtooth';
+        oscillator.frequency.value = 55;
+        gain.gain.value = 0;
+
+        oscillator.connect(gain);
+        gain.connect(this.context.destination);
+        oscillator.start();
+
+        this.engineAudio = { oscillator, gain };
+      }
+
+      const engine = this.engineAudio;
+      if (!engine || this.context.state !== 'running') return;
+
+      engine.oscillator.frequency.setTargetAtTime(
+        55 + Math.min(safeSpeed * 7, 180),
+        this.context.currentTime,
+        0.08
+      );
+
+      engine.gain.gain.setTargetAtTime(
+        Math.min(0.12, safeSpeed * 0.002),
+        this.context.currentTime,
+        0.08
+      );
+    });
+  }
+
+  stopEngine() {
+  this.engineTargetSpeed = 0;
+  const engine = this.engineAudio;
+    if (!engine || !this.context) return;
+
+    this.engineAudio = null;
+
+    const now = this.context.currentTime;
+    engine.gain.gain.cancelScheduledValues(now);
+    engine.gain.gain.setTargetAtTime(0, now, 0.04);
+
+    engine.oscillator.stop(now + 0.2);
+    window.setTimeout(() => {
+      engine.oscillator.disconnect();
+      engine.gain.disconnect();
+    }, 250);
+  }
+}
+
+const sound = new SoundEffects();
+window.sound = sound;
+window.audioDebug = async () => {
+  const activated = await sound.activate();
+
+  return {
+    activated,
+    sound: save.settings.sound,
+    music: save.settings.music,
+    context: sound.context?.state,
+    musicTimer: sound.musicTimer
+  };
+};
+const activateAudio = () => {
+  sound.activate().then((active) => {
+    if (active && save.settings.music && !sound.musicTimer) sound.setMusic(true);
+  });
+};
+window.addEventListener('pointerdown', activateAudio, { passive: true });
+window.addEventListener('touchstart', activateAudio, { passive: true });
+
+function persist() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(save));
+  } catch (error) {
+    console.warn('Progres tidak dapat disimpan di perangkat ini.', error);
+    dashboard.notice('Penyimpanan lokal tidak tersedia.');
+  }
+}
+
+function showHome() {
+  destroyGame();
+  returnPage = showHome;
+  dashboard.home({
+    playerName: save.playerName,
+    bestScore: Math.max(0, ...save.records.map((record) => record.score))
+  });
+}
+
+function showLevels() {
+  destroyGame();
+  returnPage = showDashboard;
+  dashboard.levels({
+    levels: levels.getLevels(),
+    completed: save.completed
+  });
+}
+
+function showDashboard() {
+  destroyGame();
+  returnPage = showDashboard;
+  const playerRecords = save.records.filter((record) => record.playerName === save.playerName);
+  const scores = playerRecords.map((record) => Number(record.score) || 0);
+  dashboard.dashboard({
+    playerName: save.playerName,
+    bestScore: Math.max(0, ...scores),
+    totalPoints: scores.reduce((total, score) => total + score, 0),
+    completedCount: save.completed.length
+  });
+}
+
+function destroyGame() {
+  clearCheckpointTimer();
+  gameLoadToken += 1;
+  activeJourney.currentAttempt = null;
+  if (!game) {
+    hud = null;
+    return;
+  }
+  game.destroy();
+  game = null;
+  hud = null;
+  sound.setMusic(false);
+}
+
+function startMode(mode) {
+  selectedMode = mode;
+  if (mode === 'single') {
+    dashboard.nameInput({ playerName: save.playerName });
+    return;
+  }
+  dashboard.chooseMode(mode, { playerName: save.playerName });
+}
+
+function confirmMode() {
+  const first = root.querySelector('#player-name')?.value.trim();
+  const second = root.querySelector('#player-two')?.value.trim();
+  if (!first) {
+    dashboard.notice('Nama pemain perlu diisi.');
+    return;
+  }
+  playerNames = [first, second || 'Teman'];
+  journeyScores[0] = 0;
+  journeyScores[1] = 0;
+  activeJourney.mode = selectedMode;
+  resetJourneyPlayer(0, playerNames[0], true);
+  resetJourneyPlayer(1, playerNames[1], selectedMode === 'local');
+  activeJourney.currentAttempt = null;
+  save.playerName = first;
+  persist();
+  showDashboard();
+}
+
+function startLevel(levelId, turn = 0, origin = 'select-level') {
+  selectedLevel = levels.getLevel(levelId);
+  const level = selectedLevel;
+  currentTurn = turn;
+  currentScore = 0;
+  correctCoins = 0;
+  checkpointQuizOpen = false;
+  checkpointPassed = false;
+  levelFinished = false;
+  lastGameState = { distance: 0, speed: 0, acceleration: 0, elapsed: 0, coins: 0 };
+  quiz.start(selectedLevel.id);
+  destroyGame();
+  const playerJourney = getJourneyPlayer(turn);
+  const firstLevelId = LEVEL_IDS[0];
+  let classification = 'replay';
+
+  if (playerJourney && playerJourney.pendingNewJourney && level.id === firstLevelId) {
+    journeySequence += 1;
+    playerJourney.journeyId = createRuntimeId('journey', journeySequence);
+    playerJourney.status = 'active';
+    playerJourney.pendingNewJourney = false;
+    playerJourney.completedLevels = [];
+    playerJourney.rewardedCheckpoints = [];
+    playerJourney.grandVictoryShown = false;
+    classification = 'newJourney';
+  } else if (
+    playerJourney &&
+    playerJourney.status === 'active' &&
+    playerJourney.journeyId &&
+    getNextLevelId(playerJourney) === level.id
+  ) {
+    classification = 'continuation';
+  }
+
+  if (classification === 'newJourney') journeyScores[currentTurn] = 0;
+
+  const runToken = gameLoadToken;
+  attemptSequence += 1;
+  activeJourney.currentAttempt = {
+    attemptId: createRuntimeId('attempt', attemptSequence),
+    runToken,
+    turn,
+    playerName: playerNames[turn],
+    journeyId: playerJourney?.journeyId || null,
+    levelId: level.id,
+    classification,
+    origin,
+    finalized: false
+  };
+  dashboard.game(selectedLevel, playerNames[currentTurn], currentTurn, selectedMode);
+  const canvas = root.querySelector('#game-canvas');
+  const loadToken = gameLoadToken;
+  hud = new GameHUD(root);
+  import('./game/Game.js').then(({ Game }) => {
+    if (loadToken !== gameLoadToken || !canvas.isConnected) return;
+    game = new Game(canvas, {
+  onUpdate: (state) => {
+    lastGameState = state;
+    hud?.update(state);
+    sound.updateEngine((checkpointQuizOpen || levelFinished) ? 0 : state.speed);
+  },
+      onCoin: (coins) => {
+        sound.coin();
+        dashboard.notice(`Koin terkumpul: ${coins} 🪙`);
+      },
+      onObstacle: () => {
+        currentScore -= 100;
+        dashboard.notice('Rintangan! −100 poin. Atur jalur dan kecepatan.');
+      },
+      onCheckpoint: () => {
+        checkpointQuizOpen = true;
+        quiz.startAttempt();
+        startCheckpointTimer();
+      },
+      onPauseRequest: togglePause,
+      onFinish: () => finishLevel(runToken)
+    });
+    if (save.settings.music) sound.setMusic(true);
+    game.start(level);
+  }).catch((error) => {
+    if (loadToken !== gameLoadToken) return;
+    console.error('Scene gim 3D tidak dapat dimulai.', error);
+    dashboard.notice('Scene permainan tidak dapat dimulai. Coba muat ulang halaman.');
+  });
+}
+
+function togglePause() {
+  if (!game || !game.running) return;
+  if (checkpointQuizOpen) return;
+  game.setPaused(true);
+  dashboard.pause();
+}
+
+function answerQuestion(option) {
+  if (!checkpointQuizOpen || !checkpointTimer || quiz.attemptComplete) return;
+  const result = quiz.answer(option);
+  sound.answer(result.correct);
+  if (result.correct) {
+    currentScore += 150;
+    correctCoins += 5;
+  } else currentScore -= 50;
+  if (quiz.attemptComplete) clearCheckpointTimer();
+  dashboard.answerFeedback(
+    result,
+    quiz.attemptComplete ? 'Lihat hasil percobaan →' : 'Lanjut ke soal berikutnya →',
+    remainingCheckpointTime()
+  );
+}
+
+function clearCheckpointTimer() {
+  if (checkpointTimer) window.clearInterval(checkpointTimer);
+  checkpointTimer = null;
+}
+
+function remainingCheckpointTime() {
+  return Math.max(0, Math.ceil((checkpointDeadline - Date.now()) / 1000));
+}
+
+function renderCheckpointQuestion() {
+  dashboard.question(
+    quiz.getCurrent(),
+    quiz.attemptIndex,
+    quiz.total,
+    quiz.attempt,
+    remainingCheckpointTime()
+  );
+}
+
+function startCheckpointTimer() {
+  clearCheckpointTimer();
+  checkpointDeadline = Date.now() + selectedLevel.checkpointTime * 1000;
+  renderCheckpointQuestion();
+  checkpointTimer = window.setInterval(() => {
+    const secondsLeft = remainingCheckpointTime();
+    dashboard.updateCheckpointTimer(secondsLeft);
+    if (secondsLeft > 0) return;
+    clearCheckpointTimer();
+    quiz.timeOutAttempt();
+    completeCheckpointAttempt();
+  }, 250);
+}
+
+function continueAfterAnswer() {
+  if (!quiz.attemptComplete) {
+    renderCheckpointQuestion();
+    return;
+  }
+  completeCheckpointAttempt();
+}
+
+function completeCheckpointAttempt() {
+  clearCheckpointTimer();
+  if (quiz.attemptPassed) {
+    checkpointPassed = true;
+    currentScore += 200;
+    const perfect = quiz.attempt === 1 && quiz.attemptCorrect === quiz.total;
+    if (perfect) currentScore += 300;
+    const reward = createCheckpointReward({ perfect, attempt: quiz.attempt });
+    if (reward) sound.reward(reward.type);
+    dashboard.checkpointResult({
+      passed: true,
+      correct: quiz.attemptCorrect,
+      attempt: quiz.attempt,
+      perfect,
+      reward
+    });
+    return;
+  }
+
+  currentScore -= 50;
+  const canRetry = quiz.canRetry;
+  if (!canRetry) currentScore -= 200;
+  dashboard.checkpointResult({
+    passed: false,
+    correct: quiz.attemptCorrect,
+    attempt: quiz.attempt,
+    canRetry
+  });
+}
+
+function retryCheckpoint() {
+  quiz.startAttempt();
+  startCheckpointTimer();
+}
+
+function continueAfterCheckpoint() {
+  checkpointQuizOpen = false;
+  dashboard.clearModal();
+  game?.setPaused(false);
+}
+
+function getRank(score) {
+  if (score >= 3000) return 'Ahli Fisika';
+  if (score >= 2000) return 'Adventure';
+  if (score >= 1000) return 'Pengemudi Andal';
+  return 'Penjelajah Pemula';
+}
+
+function finishLevel(runToken) {
+  const attempt = activeJourney.currentAttempt;
+  if (!attempt || attempt.finalized || attempt.runToken !== runToken) return;
+
+  clearCheckpointTimer();
+  levelFinished = true;
+  sound.setMusic(false);
+  sound.updateEngine(0);
+
+  const accuracy = quiz.answered ? Math.round(quiz.correct / quiz.answered * 100) : 0;
+  const score = currentScore + lastGameState.coins * 10;
+  journeyScores[currentTurn] += score;
+  const result = {
+    playerName: playerNames[currentTurn],
+    level: selectedLevel,
+    mode: selectedMode,
+    score,
+    journeyScore: journeyScores[currentTurn],
+    rank: getRank(journeyScores[currentTurn]),
+    correct: quiz.correct,
+    wrong: quiz.wrong,
+    answered: quiz.answered,
+    accuracy,
+    checkpointPassed,
+    attempts: quiz.attempt,
+    perfect: checkpointPassed && quiz.attempt === 1 && quiz.attemptCorrect === quiz.total,
+    elapsed: lastGameState.elapsed,
+    coins: lastGameState.coins + correctCoins,
+    missedTopics: quiz.missedTopics,
+    nextPlayer: selectedMode === 'local' && currentTurn === 0,
+    checkpointReward: attempt.checkpointReward || null,
+    grandVictory: false
+  };
+  const recordedJourneyLevel = recordJourneyLevel(selectedLevel.id, result.checkpointPassed, runToken);
+  attempt.finalized = true;
+
+  if (recordedJourneyLevel) {
+    const playerJourney = getJourneyPlayer(attempt.turn);
+    if (hasCompletedFullJourney(playerJourney) && !playerJourney.grandVictoryShown) {
+      playerJourney.grandVictoryShown = true;
+      playerJourney.status = 'completed';
+      result.grandVictory = true;
+      sound.grandVictory();
+    }
+  }
+
+  save.completed = [...new Set([...save.completed, selectedLevel.id])];
+  save.records.push({
+    playerName: result.playerName,
+    levelId: selectedLevel.id,
+    levelName: selectedLevel.name,
+    score: result.score,
+    accuracy: result.accuracy,
+    checkpointPassed: result.checkpointPassed,
+    date: new Date().toISOString()
+  });
+  save.leaderboard.push({
+    name: result.playerName,
+    level: selectedLevel.name,
+    score: result.score,
+    date: new Date().toISOString()
+  });
+  persist();
+  dashboard.evaluation(result);
+  const completedGame = game;
+  window.setTimeout(() => {
+    if (game === completedGame) destroyGame();
+  }, 0);
+}
+
+function updateSimulation() {
+  const speed = Number(root.querySelector('#sim-speed')?.value ?? 10);
+  const time = Number(root.querySelector('#sim-time')?.value ?? 5);
+  const v0 = Number(root.querySelector('#sim-v0')?.value ?? 2);
+  const acceleration = Number(root.querySelector('#sim-accel')?.value ?? 2);
+  const glbbTime = Number(root.querySelector('#sim-glbb-time')?.value ?? 4);
+  const setText = (selector, value) => {
+    const element = root.querySelector(selector);
+    if (element) element.textContent = value;
+  };
+  setText('#sim-speed-value', speed);
+  setText('#sim-time-value', time);
+  setText('#sim-distance', speed * time);
+  setText('#sim-v0-value', v0);
+  setText('#sim-accel-value', acceleration);
+  setText('#sim-glbb-time-value', glbbTime);
+  setText('#sim-final-speed', (v0 + acceleration * glbbTime).toFixed(1));
+  setText('#sim-glbb-distance', (v0 * glbbTime + 0.5 * acceleration * glbbTime ** 2).toFixed(1));
+  const drawGraph = (canvasId, label, startValue, endValue, maxValue, color) => {
+    const canvas = root.querySelector(`#${canvasId}`);
+    if (!canvas) return;
+    const context = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const left = 62;
+    const right = width - 22;
+    const top = 18;
+    const bottom = height - 35;
+    context.clearRect(0, 0, width, height);
+    context.fillStyle = '#f5faff';
+    context.fillRect(0, 0, width, height);
+    context.strokeStyle = '#dce8f3';
+    context.lineWidth = 1;
+    for (let x = left + 65; x < right; x += 65) {
+      context.beginPath(); context.moveTo(x, top); context.lineTo(x, bottom); context.stroke();
+    }
+    for (let y = top + 38; y < bottom; y += 38) {
+      context.beginPath(); context.moveTo(left, y); context.lineTo(right, y); context.stroke();
+    }
+    context.strokeStyle = '#8497ab';
+    context.beginPath(); context.moveTo(left, top); context.lineTo(left, bottom); context.lineTo(right, bottom); context.stroke();
+    context.fillStyle = '#60738a';
+    context.font = '14px system-ui';
+    context.fillText(label, 10, 22);
+    context.fillText('t (s)', width - 49, height - 10);
+    context.strokeStyle = color;
+    context.lineWidth = 4;
+    context.beginPath();
+    context.moveTo(left, bottom - Math.min(1, startValue / maxValue) * (bottom - top));
+    context.lineTo(right, bottom - Math.min(1, endValue / maxValue) * (bottom - top));
+    context.stroke();
+  };
+  drawGraph('material-graph', 's (m)', 0, speed * time, 250, '#337fe0');
+  drawGraph('velocity-graph', 'v (m/s)', v0, v0 + acceleration * glbbTime, 60, '#31a77d');
+  drawGraph('acceleration-graph', 'a (m/s²)', acceleration, acceleration, 8, '#eb9450');
+}
+
+root.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-action]');
+  if (!button || button.disabled) return;
+  const { action } = button.dataset;
+  if (action !== 'answer') sound.tone(520, 0.05, 'sine', 0.025);
+  switch (action) {
+    case 'home': showHome(); break;
+    case 'start': startMode('single'); break;
+    case 'guide': returnPage = showDashboard; dashboard.guide(); break;
+    case 'levels': showLevels(); break;
+    case 'select-level':
+      {
+        const selectedIndex = levels.getLevels().findIndex((level) => level.id === button.dataset.level);
+        const previousLevel = levels.getLevels()[selectedIndex - 1];
+        if (previousLevel && !save.completed.includes(previousLevel.id)) {
+          dashboard.notice(`Selesaikan Level 0${selectedIndex} untuk membuka lintasan berikutnya.`);
+        } else startLevel(button.dataset.level, 0, 'select-level');
+      }
+      break;
+    case 'local-mode': startMode('local'); break;
+    case 'confirm-mode': confirmMode(); break;
+    case 'materials': returnPage = showDashboard; dashboard.materials(); updateSimulation(); break;
+    case 'settings': returnPage = showDashboard; dashboard.settings(save); break;
+    case 'profile': returnPage = showHome; dashboard.profile({ ...save, levels: levels.getLevels() }); break;
+    case 'history': returnPage = showDashboard; dashboard.history(save.records.filter((record) => record.playerName === save.playerName)); break;
+    case 'leaderboard': returnPage = showHome; dashboard.leaderboard(save.leaderboard); break;
+    case 'back': returnPage(); break;
+    case 'pause': togglePause(); break;
+    case 'resume': dashboard.clearModal(); game?.setPaused(false); break;
+    case 'quit': showHome(); break;
+    case 'answer': answerQuestion(Number(button.dataset.option)); break;
+    case 'continue': continueAfterAnswer(); break;
+    case 'retry-attempt': retryCheckpoint(); break;
+    case 'continue-checkpoint':
+    case 'continue-after-fail': continueAfterCheckpoint(); break;
+    case 'next-player': startLevel(selectedLevel.id, 1, 'next-player'); break;
+  }
+});
+
+root.addEventListener('change', (event) => {
+  const setting = event.target.dataset.setting;
+  if (!setting) return;
+  save.settings[setting] = event.target.checked;
+  persist();
+  if (setting === 'music') {
+    if (save.settings.music) sound.setMusic(true);
+    else sound.setMusic(false);
+  }
+  if (setting === 'sound' && !save.settings.sound) sound.setMusic(false);
+});
+
+root.addEventListener('input', (event) => {
+  if (event.target.matches('#sim-speed, #sim-time, #sim-v0, #sim-accel, #sim-glbb-time')) updateSimulation();
+});
+
+const activeControls = new Map();
+const controlPointers = new Map();
+root.addEventListener('pointerdown', (event) => {
+  const button = event.target.closest('[data-control]');
+  if (!button || !game) return;
+  event.preventDefault();
+  button.setPointerCapture(event.pointerId);
+  const { control } = button.dataset;
+  activeControls.set(event.pointerId, control);
+  if (!controlPointers.has(control)) controlPointers.set(control, new Set());
+  controlPointers.get(control).add(event.pointerId);
+  game.setControl(control, true);
+});
+const releaseControl = (event) => {
+  const control = activeControls.get(event.pointerId);
+  if (control) {
+    const pointers = controlPointers.get(control);
+    pointers?.delete(event.pointerId);
+    if (!pointers?.size) {
+      game?.setControl(control, false);
+      controlPointers.delete(control);
+    }
+  }
+  activeControls.delete(event.pointerId);
+};
+root.addEventListener('pointerup', releaseControl);
+root.addEventListener('pointercancel', releaseControl);
+root.addEventListener('lostpointercapture', releaseControl);
+
+function showHomeAtStartup() {
+  showHome();
+  updateSimulation();
+}
+
+showHomeAtStartup();
